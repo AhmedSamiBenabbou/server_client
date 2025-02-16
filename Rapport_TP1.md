@@ -16,7 +16,7 @@
 
 Ce travail pratique consiste en la réalisation d'une application de chat client-serveur en Java. L'objectif principal est de mettre en pratique les concepts fondamentaux des réseaux informatiques tout en développant une application robuste et fonctionnelle. Le système permet à plusieurs clients de se connecter à un serveur central pour échanger des messages en temps réel, avec des fonctionnalités de gestion des utilisateurs et de persistance des données.
 
-### 1.1 Objectifs Techniques
+### 1.1 Objectif Techniques
 - Implémentation d'une architecture client-serveur avec sockets TCP/IP
 - Gestion de la concurrence pour les multiples connexions
 - Persistance des données avec JSON
