@@ -18,7 +18,7 @@ Ce travail pratique consiste en la réalisation d'une application de chat client
 
 ### 1.1 Objectifs Techniques
 - Implémentation d'une architecture client-serveur avec sockets TCP/IP
-- Gestion de la concurrence pour les connexions multiples
+- Gestion de la concurrence pour les multiples connexions
 - Persistance des données avec JSON
 - Validation et sécurisation des entrées utilisateur
 - Gestion efficace des ressources système
