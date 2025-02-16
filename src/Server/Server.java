@@ -1,58 +1,179 @@
 package Server;
 
-import Client.Client;
-import Common.CommandCallback;
-import Server.CommandHandler.RegisterUserCommand;
-
 import java.io.*;
 import java.net.*;
 import java.nio.file.Files;
-import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Scanner;
 import java.util.List;
-
-import Server.CommandHandler.SendMessageCommand;
 import org.json.JSONArray;
 import org.json.JSONObject;
+import Constants.ChatConstants;
 
 public class Server {
     private static String serverAddress;
     private static int serverPort;
     private static ServerSocket serverSocket;
-    private static Scanner scanner = new Scanner(System.in);
-    private static int clientNumber = 0;
-    private static List<Client> clients = new ArrayList<>();
-    private static final File DATA_FOLDER = new File("data");
-    private static final File USER_FILE = new File(DATA_FOLDER, "users.json");
-    private static final File MESSAGE_FILE = new File(DATA_FOLDER, "messages.json");
+    private static final File DATA_FOLDER = new File(ChatConstants.DATA_FOLDER_PATH);
+    private static final File USER_FILE = new File(DATA_FOLDER, ChatConstants.USERS_FILE);
+    private static final File MESSAGE_FILE = new File(DATA_FOLDER, ChatConstants.MESSAGES_FILE);
+    private static List<ClientHandler> clients = new ArrayList<>();
+    private static int clientCounter = 0; // Counter for client numbers
 
-    private static void setupFolder(File folder) {
-        if (!folder.exists()) {
-            boolean created = folder.mkdirs();
-            if (created) {
-                System.out.println("Folder " + folder.getPath() + " created successfully.");
-            } else {
-                System.out.println("Failed to create folder " + folder.getPath());
+    private static class ClientHandler extends Thread {
+        private Socket socket;
+        private PrintWriter writer;
+        private BufferedReader reader;
+        private String username;
+        private final int clientNumber; // Unique number for this client
+
+        public ClientHandler(Socket socket) {
+            this.socket = socket;
+            this.clientNumber = ++clientCounter; // Assign unique number
+        }
+
+        @Override
+        public void run() {
+            try {
+                writer = new PrintWriter(socket.getOutputStream(), true);
+                reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+
+                // Authentication
+                String command = reader.readLine();
+                if (ChatConstants.REGISTER_USER_CMD.equals(command)) {
+                    username = reader.readLine();
+                    String password = reader.readLine();
+                    handleAuthentication(username, password);
+                }
+
+                // Send client number confirmation
+                writer.println("CLIENT_NUMBER:" + clientNumber);
+
+                // Envoi de l'historique
+                sendChatHistory();
+
+                // Boucle de réception des messages
+                String message;
+                while ((message = reader.readLine()) != null) {
+                    if (ChatConstants.EXIT_COMMAND.equalsIgnoreCase(message)) {
+                        break;
+                    }
+                    handleMessage(message);
+                }
+            } catch (IOException e) {
+                System.err.println("Erreur client: " + e.getMessage());
+            } finally {
+                disconnect();
+            }
+        }
+
+        private void handleAuthentication(String username, String password) {
+            JSONArray users = readUsersFromFile();
+            boolean userExists = false;
+
+            for (int i = 0; i < users.length(); i++) {
+                JSONObject user = users.getJSONObject(i);
+                if (user.getString("username").equals(username)) {
+                    userExists = true;
+                    if (user.getString("password").equals(password)) {
+                        writer.println(ChatConstants.AUTH_SUCCESS);
+                    } else {
+                        writer.println(ChatConstants.AUTH_FAILED);
+                        disconnect();
+                    }
+                    break;
+                }
+            }
+
+            if (!userExists) {
+                // Auto-create account
+                JSONObject newUser = new JSONObject();
+                newUser.put("username", username);
+                newUser.put("password", password);
+                users.put(newUser);
+                writeUsersToFile(users);
+                writer.println(ChatConstants.AUTH_SUCCESS);
+            }
+        }
+
+        private void sendChatHistory() {
+            JSONArray messages = readMessagesFromFile();
+            // Calculate starting index to get last 15 messages
+            int startIndex = Math.max(0, messages.length() - 15);
+            
+            for (int i = startIndex; i < messages.length(); i++) {
+                JSONObject msg = messages.getJSONObject(i);
+                String formattedMessage = msg.has("formattedMessage") ? 
+                    msg.getString("formattedMessage") : 
+                    String.format("[%s]: %s", msg.getString("username"), msg.getString("message"));
+                writer.println(formattedMessage);
+            }
+            writer.println("END_HISTORY");
+        }
+
+        private void handleMessage(String message) {
+            if (message.length() > ChatConstants.MAX_MESSAGE_LENGTH) {
+                writer.println("Error: Message too long (max " + ChatConstants.MAX_MESSAGE_LENGTH + " characters)");
+                return;
+            }
+
+            String formattedMessage = String.format(ChatConstants.MESSAGE_FORMAT,
+                username,
+                socket.getInetAddress().getHostAddress(),
+                socket.getPort(),
+                new java.text.SimpleDateFormat(ChatConstants.DATE_FORMAT).format(new java.util.Date()),
+                message
+            );
+
+            // Store message
+            storeMessage(username, message, formattedMessage);
+
+            // Real-time display on server
+            System.out.println(formattedMessage);
+
+            // Broadcast to all clients except sender
+            broadcastMessage(formattedMessage);
+        }
+
+        private void broadcastMessage(String message) {
+            for (ClientHandler client : clients) {
+                // Skip the sender to avoid echo
+                if (client != this && client.writer != null) {
+                    client.writer.println(message);
+                }
+            }
+        }
+
+        private void disconnect() {
+            clients.remove(this);
+            try {
+                if (writer != null) writer.close();
+                if (reader != null) reader.close();
+                if (socket != null) socket.close();
+            } catch (IOException e) {
+                System.err.println("Erreur lors de la déconnexion: " + e.getMessage());
             }
         }
     }
 
     private static void setupDataFolder() {
-        setupFolder(DATA_FOLDER);
+        if (!DATA_FOLDER.exists()) {
+            DATA_FOLDER.mkdirs();
+        }
     }
 
-    public static void storeMessage(String username, String messageContent) {
+    private static void storeMessage(String username, String message, String formattedMessage) {
         setupDataFolder();
-        JSONArray messagesArray = readMessagesFromFile();
-
-        JSONObject message = new JSONObject();
-        message.put("username", username);
-        message.put("message", messageContent);
-        message.put("timestamp", System.currentTimeMillis());
-
-        messagesArray.put(message);
-        writeMessagesToFile(messagesArray);
+        JSONArray messages = readMessagesFromFile();
+        
+        JSONObject newMessage = new JSONObject();
+        newMessage.put("username", username);
+        newMessage.put("message", message);
+        newMessage.put("formattedMessage", formattedMessage);
+        newMessage.put("timestamp", System.currentTimeMillis());
+        
+        messages.put(newMessage);
+        writeMessagesToFile(messages);
     }
 
     private static JSONArray readMessagesFromFile() {
@@ -60,44 +181,19 @@ public class Server {
             if (!MESSAGE_FILE.exists()) {
                 return new JSONArray();
             }
-
-            String content = new String(Files.readAllBytes(MESSAGE_FILE.toPath()));
-            return new JSONArray(content);
+            return new JSONArray(new String(Files.readAllBytes(MESSAGE_FILE.toPath())));
         } catch (IOException e) {
-            System.err.println("Error reading message file: " + e.getMessage());
+            System.err.println("Erreur lecture messages: " + e.getMessage());
             return new JSONArray();
         }
     }
 
-    private static void writeMessagesToFile(JSONArray messagesArray) {
-        try (FileWriter fileWriter = new FileWriter(MESSAGE_FILE)) {
-            fileWriter.write(messagesArray.toString(4));
+    private static void writeMessagesToFile(JSONArray messages) {
+        try (FileWriter writer = new FileWriter(MESSAGE_FILE)) {
+            writer.write(messages.toString(4));
         } catch (IOException e) {
-            System.err.println("Error writing message file: " + e.getMessage());
+            System.err.println("Erreur écriture messages: " + e.getMessage());
         }
-    }
-
-    public static void storeUser(String username, String password) {
-        setupDataFolder();
-
-        JSONArray usersArray = readUsersFromFile();
-
-        for (int i = 0; i < usersArray.length(); i++) {
-            JSONObject user = usersArray.getJSONObject(i);
-            if (user.getString("username").equals(username)) {
-                System.out.println("Error: Username already exists.");
-                return;
-            }
-        }
-
-        JSONObject newUser = new JSONObject();
-        newUser.put("username", username);
-        newUser.put("password", password);
-
-        usersArray.put(newUser);
-
-        writeUsersToFile(usersArray);
-        System.out.println("User " + username + " registered successfully.");
     }
 
     private static JSONArray readUsersFromFile() {
@@ -105,155 +201,72 @@ public class Server {
             if (!USER_FILE.exists()) {
                 return new JSONArray();
             }
-
-            String content = new String(Files.readAllBytes(USER_FILE.toPath()));
-            return new JSONArray(content);
+            return new JSONArray(new String(Files.readAllBytes(USER_FILE.toPath())));
         } catch (IOException e) {
-            System.err.println("Error reading user file: " + e.getMessage());
+            System.err.println("Erreur lecture utilisateurs: " + e.getMessage());
             return new JSONArray();
         }
     }
 
-    private static void writeUsersToFile(JSONArray usersArray) {
-        try (FileWriter fileWriter = new FileWriter(USER_FILE)) {
-            fileWriter.write(usersArray.toString(4));
+    private static void writeUsersToFile(JSONArray users) {
+        try (FileWriter writer = new FileWriter(USER_FILE)) {
+            writer.write(users.toString(4));
         } catch (IOException e) {
-            System.err.println("Error writing user file: " + e.getMessage());
-        }
-    }
-
-    private static boolean ipValidator(String ip) {
-        String[] ipChunks = ip.split("\\.");
-
-        if (ipChunks.length != 4) {
-            throw new IllegalArgumentException("L'adresse IP doit contenir exactement 4 octets.");
-        }
-
-        for (String chunk : ipChunks) {
-            try {
-                int ipChunk = Integer.parseInt(chunk);
-                if (ipChunk < 0 || ipChunk > 255) {
-                    throw new IllegalArgumentException("Chaque octet de l'adresse IP doit être compris entre 0 et 255.");
-                }
-            } catch (NumberFormatException e) {
-                throw new NumberFormatException("Chaque octet de l'adresse IP doit être un entier valide.");
-            }
-        }
-
-        return true;
-    }
-
-    private static boolean portValidator(String portInput) {
-        try {
-            int port = Integer.parseInt(portInput);
-            System.out.print(port);
-            if (port < 5000 || 5050 < port) {
-                throw new IllegalArgumentException("Le port doit être compris entre 5000 et 5050.");
-            }
-            return true;
-        } catch (NumberFormatException e) {
-            throw new NumberFormatException("Le port doit être un entier valide.");
+            System.err.println("Erreur écriture utilisateurs: " + e.getMessage());
         }
     }
 
     private static void userInput() {
-        boolean ipValid = false;
-        boolean portValid = false;
+        Scanner scanner = new Scanner(System.in);
+        boolean validInput = false;
 
-        while (!ipValid) {
-            System.out.print("Veuillez entrer l'adresse IP du serveur: ");
-            String ipInput = scanner.nextLine().trim();
-
+        while (!validInput) {
             try {
-                ipValid = ipValidator(ipInput);
-                serverAddress = ipInput;
-            } catch (IllegalArgumentException  e) {
-                System.out.println("Erreur : " + e.getMessage());
+                System.out.print("Adresse IP du serveur: ");
+                serverAddress = scanner.nextLine().trim();
+                if (!serverAddress.matches("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$")) {
+                    throw new IllegalArgumentException("Format d'IP invalide");
+                }
+
+                System.out.print("Port du serveur (" + ChatConstants.MIN_PORT + "-" + ChatConstants.MAX_PORT + "): ");
+                serverPort = Integer.parseInt(scanner.nextLine().trim());
+                if (serverPort < ChatConstants.MIN_PORT || serverPort > ChatConstants.MAX_PORT) {
+                    throw new IllegalArgumentException("Port hors limites (" + ChatConstants.MIN_PORT + "-" + ChatConstants.MAX_PORT + ")");
+                }
+
+                validInput = true;
+            } catch (Exception e) {
+                System.out.println("Erreur: " + e.getMessage());
             }
-        }
-
-        while (!portValid) {
-            System.out.print("Veuillez entrer le port du serveur: ");
-            String portInput = scanner.nextLine().trim();
-
-            try {
-                portValid = portValidator(portInput);
-                serverPort = Integer.parseInt(portInput);
-            } catch (IllegalArgumentException  e) {
-                System.out.println("Erreur : " + e.getMessage());
-            }
-        }
-    }
-
-    public static void handleClient(Socket socket) {
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-             PrintWriter writer = new PrintWriter(socket.getOutputStream(), true)) {
-
-            String commandType = reader.readLine();
-
-            if ("REGISTER_USER".equals(commandType)) {
-                String username = reader.readLine();
-                String password = reader.readLine();
-
-                RegisterUserCommand registerCommand = new RegisterUserCommand(username, password);
-                registerCommand.execute(socket, new CommandCallback() {
-                    @Override
-                    public void onFailure(String errorMessage) {
-                        writer.println("Error: " + errorMessage);
-                    }
-
-                    @Override
-                    public void onSuccess(String successMessage) {
-                        writer.println(successMessage);
-                    }
-                });
-            }
-
-
-        } catch (IOException e) {
-            System.err.println("Error handling client: " + e.getMessage());
         }
     }
 
     public static void main(String[] args) {
+        setupDataFolder();
+        userInput();
+
         try {
-            //userInput();
             serverSocket = new ServerSocket();
             serverSocket.setReuseAddress(true);
-
-            String localServerHost ="127.0.0.1";
-            int localServerPort = 5020;
-
-            // InetAddress serverIP = InetAddress.getByName(serverAddress);
-            // serverSocket.bind(new InetSocketAddress(serverIP, serverPort));
-            // System.out.format("\nServeur créé -> %s:%d%n\n", serverAddress, serverPort);
-
-            InetAddress serverIP = InetAddress.getByName(localServerHost);
-            serverSocket.bind(new InetSocketAddress(serverIP, localServerPort));
-            System.out.format("\nServeur créé -> %s:%d%n\n", localServerHost, localServerPort);
+            serverSocket.bind(new InetSocketAddress(serverAddress, serverPort));
+            System.out.println("Serveur démarré sur " + serverAddress + ":" + serverPort);
 
             while (true) {
-                try {
-                     Client client = new Client(serverSocket.accept(), ++clientNumber);
-                        client.start();
-                } catch (IOException e) {
-                    System.err.println("Erreur lors de l'acceptation d'un client : " + e.getMessage());
-                }
+                Socket clientSocket = serverSocket.accept();
+                ClientHandler clientHandler = new ClientHandler(clientSocket);
+                clients.add(clientHandler);
+                clientHandler.start();
+                System.out.println("Nouveau client connecté: " + clientSocket.getInetAddress().getHostAddress());
             }
-
-        } catch (BindException e) {
-            System.err.println("Erreur : L'adresse et le port sont déjà utilisés.");
-        } catch (UnknownHostException e) {
-            System.err.println("Erreur : Adresse IP invalide.");
         } catch (IOException e) {
-            System.err.println("Erreur lors de la création du serveur : " + e.getMessage());
+            System.err.println("Erreur serveur: " + e.getMessage());
         } finally {
             if (serverSocket != null && !serverSocket.isClosed()) {
                 try {
                     serverSocket.close();
                     System.out.println("Serveur arrêté.");
                 } catch (IOException e) {
-                    System.err.println("Erreur lors de la fermeture du serveur : " + e.getMessage());
+                    System.err.println("Erreur fermeture serveur: " + e.getMessage());
                 }
             }
         }
