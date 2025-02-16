@@ -6,19 +6,15 @@ import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.Socket;
 import java.util.Scanner;
-import org.json.JSONArray;
-import org.json.JSONObject;
 import Constants.ChatConstants;
 
 public class Client extends Thread {
-    private Socket socket;
+    private final Socket socket;
     private static String serverAddress;
     private static int serverPort;
     private boolean isConnected = false;
     private PrintWriter writer;
-    private BufferedReader reader;
     private MessageReceiver messageReceiver;
-    private int clientNumber;
 
     public Client(Socket socket) {
         this.socket = socket;
@@ -84,7 +80,7 @@ public class Client extends Thread {
         }
     }
 
-    private class MessageReceiver extends Thread {
+    private static class MessageReceiver extends Thread {
         private final BufferedReader reader;
         private boolean running = true;
 
@@ -98,7 +94,7 @@ public class Client extends Thread {
                 String message;
                 while (running && (message = reader.readLine()) != null) {
                     if (message.startsWith("CLIENT_NUMBER:")) {
-                        clientNumber = Integer.parseInt(message.split(":")[1]);
+                        int clientNumber = Integer.parseInt(message.split(":")[1]);
                         System.out.println("Connected as client #" + clientNumber);
                         continue;
                     }
@@ -128,7 +124,7 @@ public class Client extends Thread {
     public void run() {
         try {
             writer = new PrintWriter(socket.getOutputStream(), true);
-            reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
             Scanner scanner = new Scanner(System.in);
 
             System.out.print("Username: ");
